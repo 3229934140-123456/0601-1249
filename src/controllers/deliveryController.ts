@@ -33,7 +33,7 @@ const rowToDelivery = (row: any): PendingDelivery => ({
 });
 
 export const getPendingDeliveries = (req: Request, res: Response): void => {
-  const { patientId, sessionId, type, status, page = 1, pageSize = 20 } = req.query;
+  const { patientId, sessionId, type, status, riskLevel, page = 1, pageSize = 20 } = req.query;
 
   const pageNum = Number(page);
   const pageSizeNum = Number(pageSize);
@@ -57,6 +57,10 @@ export const getPendingDeliveries = (req: Request, res: Response): void => {
   if (status) {
     whereClause += ' AND status = ?';
     params.push(status);
+  }
+  if (riskLevel) {
+    whereClause += ' AND risk_level = ?';
+    params.push(riskLevel);
   }
 
   const countStmt = db.prepare(`SELECT COUNT(*) as total FROM pending_deliveries ${whereClause}`);
@@ -146,8 +150,15 @@ export const getDeliveryPreview = (req: Request, res: Response): void => {
     else if (detected.length > 0) resolvedRiskLevel = 'low';
   }
 
-  const questionnaireRecs = recommendQuestionnaires(symptoms, [], resolvedRiskLevel, summaryContent);
-  const reminderRec = recommendFamilyReminder(resolvedRiskLevel, summaryContent);
+  const existingDrafts = db.prepare(`
+    SELECT * FROM pending_deliveries
+    WHERE patient_id = ? AND status = 'pending'
+    ${sessionId ? 'AND session_id = ?' : ''}
+    ${summaryId ? 'AND summary_id = ?' : ''}
+    ORDER BY created_at DESC
+  `).all(
+    ...[patientId, ...(sessionId ? [sessionId] : []), ...(summaryId ? [summaryId] : [])]
+  ) as any[];
 
   const allQuestionnaires = db.prepare('SELECT * FROM questionnaires').all() as any[];
   const allTemplates = db.prepare('SELECT * FROM message_templates').all() as any[];
@@ -156,73 +167,149 @@ export const getDeliveryPreview = (req: Request, res: Response): void => {
   `).all(patientId) as any[];
 
   const pendingItems: any[] = [];
+  const draftTypeSet = new Set<string>();
+
+  for (const draft of existingDrafts) {
+    const item: any = {
+      id: draft.id,
+      type: draft.type,
+      title: draft.title,
+      content: draft.content,
+      templateId: draft.template_id,
+      questionnaireId: draft.questionnaire_id,
+      familyMemberId: draft.family_member_id,
+      recommendedReason: draft.recommended_reason,
+      riskLevel: draft.risk_level,
+      channel: draft.channel,
+      patientId: draft.patient_id,
+      sessionId: draft.session_id,
+      summaryId: draft.summary_id,
+      isDraft: true,
+      draftCreatedAt: draft.created_at,
+    };
+
+    if (draft.questionnaire_id) {
+      const q = allQuestionnaires.find((qq: any) => qq.id === draft.questionnaire_id);
+      if (q) {
+        item.questionnaire = {
+          id: q.id,
+          title: q.title,
+          type: q.type,
+          description: q.description,
+        };
+      }
+    }
+
+    if (draft.template_id) {
+      const t = allTemplates.find((tt: any) => tt.id === draft.template_id);
+      if (t) {
+        item.template = {
+          id: t.id,
+          name: t.name,
+          type: t.type,
+          title: t.title,
+          content: t.content,
+          channel: t.channel,
+        };
+      }
+    }
+
+    if (draft.family_member_id) {
+      const f = familyMembers.find((ff: any) => ff.id === draft.family_member_id);
+      if (f) {
+        item.familyMember = {
+          id: f.id,
+          name: f.name,
+          relationship: f.relationship,
+          phone: f.phone,
+        };
+      }
+    }
+
+    pendingItems.push(item);
+    draftTypeSet.add(draft.type);
+  }
+
   const usedQIds = new Set<string>();
+  for (const item of pendingItems) {
+    if (item.questionnaireId) usedQIds.add(item.questionnaireId);
+  }
 
-  for (const rec of questionnaireRecs) {
-    const matched = allQuestionnaires.find(
-      (q) => q.type === rec.questionnaireType && !usedQIds.has(q.id)
-    ) || allQuestionnaires.find(
-      (q) => !usedQIds.has(q.id) && q.type === rec.questionnaireType
-    ) || allQuestionnaires.find((q) => !usedQIds.has(q.id));
+  if (!draftTypeSet.has('questionnaire')) {
+    const questionnaireRecs = recommendQuestionnaires(symptoms, [], resolvedRiskLevel, summaryContent);
 
-    if (matched) {
-      usedQIds.add(matched.id);
-      const id = uuidv4();
-      pendingItems.push({
-        id,
-        type: 'questionnaire',
-        title: matched.title,
-        content: matched.description,
-        questionnaireId: matched.id,
-        questionnaire: {
-          id: matched.id,
+    for (const rec of questionnaireRecs) {
+      const matched = allQuestionnaires.find(
+        (q: any) => q.type === rec.questionnaireType && !usedQIds.has(q.id)
+      ) || allQuestionnaires.find(
+        (q: any) => !usedQIds.has(q.id) && q.type === rec.questionnaireType
+      ) || allQuestionnaires.find((q: any) => !usedQIds.has(q.id));
+
+      if (matched) {
+        usedQIds.add(matched.id);
+        pendingItems.push({
+          id: uuidv4(),
+          type: 'questionnaire',
           title: matched.title,
-          type: matched.type,
-          description: matched.description,
+          content: matched.description,
+          questionnaireId: matched.id,
+          questionnaire: {
+            id: matched.id,
+            title: matched.title,
+            type: matched.type,
+            description: matched.description,
+          },
+          recommendedReason: rec.reason,
+          riskLevel: resolvedRiskLevel,
+          patientId,
+          sessionId,
+          summaryId,
+          isDraft: false,
+        });
+      }
+    }
+  }
+
+  if (!draftTypeSet.has('family_reminder')) {
+    const reminderRec = recommendFamilyReminder(resolvedRiskLevel, summaryContent);
+    const matchedTemplate = allTemplates.find(
+      (t: any) => t.type === reminderRec.templateType
+    ) || allTemplates.find((t: any) => t.type === 'reminder') || allTemplates[0];
+
+    if (matchedTemplate) {
+      pendingItems.push({
+        id: uuidv4(),
+        type: 'family_reminder',
+        title: matchedTemplate.title,
+        content: matchedTemplate.content,
+        templateId: matchedTemplate.id,
+        template: {
+          id: matchedTemplate.id,
+          name: matchedTemplate.name,
+          type: matchedTemplate.type,
+          title: matchedTemplate.title,
+          content: matchedTemplate.content,
+          channel: matchedTemplate.channel,
         },
-        recommendedReason: rec.reason,
+        recommendedReason: reminderRec.reason,
+        urgency: reminderRec.urgency,
         riskLevel: resolvedRiskLevel,
         patientId,
         sessionId,
         summaryId,
+        isDraft: false,
+        availableFamilyMembers: familyMembers.map((f: any) => ({
+          id: f.id,
+          name: f.name,
+          relationship: f.relationship,
+          phone: f.phone,
+        })),
       });
     }
   }
 
-  const matchedTemplate = allTemplates.find(
-    (t) => t.type === reminderRec.templateType
-  ) || allTemplates.find((t) => t.type === 'reminder') || allTemplates[0];
-
-  if (matchedTemplate) {
-    const id = uuidv4();
-    pendingItems.push({
-      id,
-      type: 'family_reminder',
-      title: matchedTemplate.title,
-      content: matchedTemplate.content,
-      templateId: matchedTemplate.id,
-      template: {
-        id: matchedTemplate.id,
-        name: matchedTemplate.name,
-        type: matchedTemplate.type,
-        title: matchedTemplate.title,
-        content: matchedTemplate.content,
-        channel: matchedTemplate.channel,
-      },
-      recommendedReason: reminderRec.reason,
-      urgency: reminderRec.urgency,
-      riskLevel: resolvedRiskLevel,
-      patientId,
-      sessionId,
-      summaryId,
-      availableFamilyMembers: familyMembers.map((f) => ({
-        id: f.id,
-        name: f.name,
-        relationship: f.relationship,
-        phone: f.phone,
-      })),
-    });
-  }
+  const draftCount = pendingItems.filter((i) => i.isDraft).length;
+  const newRecCount = pendingItems.filter((i) => !i.isDraft).length;
 
   success(res, {
     patientId,
@@ -230,6 +317,9 @@ export const getDeliveryPreview = (req: Request, res: Response): void => {
     summaryId,
     detectedRiskLevel: resolvedRiskLevel || null,
     pendingCount: pendingItems.length,
+    draftCount,
+    newRecommendationCount: newRecCount,
+    hasExistingDrafts: draftCount > 0,
     items: pendingItems,
   });
 };
@@ -574,4 +664,231 @@ export const getDeliveryRelatedRecords = (req: Request, res: Response): void => 
   );
 
   success(res, result);
+};
+
+export const getPatientDeliveryStats = (_req: Request, res: Response): void => {
+  const pendingDeliveries = db.prepare(`
+    SELECT pd.*, p.name as patient_name
+    FROM pending_deliveries pd
+    LEFT JOIN patients p ON pd.patient_id = p.id
+    WHERE pd.status = 'pending'
+    ORDER BY pd.created_at DESC
+  `).all() as any[];
+
+  const patientMap = new Map<string, any>();
+
+  for (const delivery of pendingDeliveries) {
+    const patientId = delivery.patient_id;
+    if (!patientMap.has(patientId)) {
+      patientMap.set(patientId, {
+        patientId,
+        patientName: delivery.patient_name,
+        pendingCount: 0,
+        highRiskCount: 0,
+        mediumRiskCount: 0,
+        lowRiskCount: 0,
+        questionnaireCount: 0,
+        familyReminderCount: 0,
+        lastRecommendedReason: '',
+        lastRecommendedAt: null,
+        pendingDeliveryIds: [] as string[],
+      });
+    }
+
+    const stats = patientMap.get(patientId)!;
+    stats.pendingCount++;
+    stats.pendingDeliveryIds.push(delivery.id);
+
+    if (delivery.risk_level === 'high') stats.highRiskCount++;
+    else if (delivery.risk_level === 'medium') stats.mediumRiskCount++;
+    else if (delivery.risk_level === 'low') stats.lowRiskCount++;
+
+    if (delivery.type === 'questionnaire') stats.questionnaireCount++;
+    else if (delivery.type === 'family_reminder') stats.familyReminderCount++;
+
+    if (!stats.lastRecommendedAt || delivery.created_at > stats.lastRecommendedAt) {
+      stats.lastRecommendedReason = delivery.recommended_reason || '';
+      stats.lastRecommendedAt = delivery.created_at;
+    }
+  }
+
+  const patientList = Array.from(patientMap.values()).sort((a, b) => {
+    if (b.highRiskCount !== a.highRiskCount) return b.highRiskCount - a.highRiskCount;
+    if (b.mediumRiskCount !== a.mediumRiskCount) return b.mediumRiskCount - a.mediumRiskCount;
+    return b.pendingCount - a.pendingCount;
+  });
+
+  success(res, {
+    totalPatients: patientList.length,
+    totalPending: pendingDeliveries.length,
+    patients: patientList,
+  });
+};
+
+export const getRelationshipView = (req: Request, res: Response): void => {
+  const { deliveryId, notificationId, recommendationId, auditLogId } = req.query;
+
+  if (!deliveryId && !notificationId && !recommendationId && !auditLogId) {
+    badRequest(res, '请至少提供一个ID参数：deliveryId / notificationId / recommendationId / auditLogId');
+    return;
+  }
+
+  let foundDelivery: any = null;
+  let sourceType = '';
+  let sourceId = '';
+
+  if (deliveryId) {
+    foundDelivery = db.prepare('SELECT * FROM pending_deliveries WHERE id = ?').get(deliveryId as string);
+    sourceType = 'delivery';
+    sourceId = deliveryId as string;
+  } else if (notificationId) {
+    foundDelivery = db.prepare('SELECT * FROM pending_deliveries WHERE related_notification_id = ?').get(notificationId as string);
+    sourceType = 'notification';
+    sourceId = notificationId as string;
+  } else if (recommendationId) {
+    foundDelivery = db.prepare('SELECT * FROM pending_deliveries WHERE related_recommendation_id = ?').get(recommendationId as string);
+    sourceType = 'questionnaire_recommendation';
+    sourceId = recommendationId as string;
+  } else if (auditLogId) {
+    const auditLog = db.prepare('SELECT * FROM audit_logs WHERE id = ?').get(auditLogId as string);
+    if (auditLog && auditLog.resource_type === 'pending_delivery') {
+      foundDelivery = db.prepare('SELECT * FROM pending_deliveries WHERE id = ?').get(auditLog.resource_id);
+      sourceType = 'audit_log';
+      sourceId = auditLogId as string;
+    }
+  }
+
+  if (!foundDelivery) {
+    success(res, {
+      found: false,
+      sourceType,
+      sourceId,
+      message: '未找到关联的待发送记录',
+      delivery: null,
+      patient: null,
+      session: null,
+      doctor: null,
+      notification: null,
+      questionnaireRecommendation: null,
+      questionnaire: null,
+      template: null,
+      familyMember: null,
+      auditLog: null,
+      allAuditLogs: [],
+    });
+    return;
+  }
+
+  const delivery = rowToDelivery(foundDelivery) as any;
+
+  const patient = db.prepare('SELECT id, name, age, gender, phone, doctor_id FROM patients WHERE id = ?').get(foundDelivery.patient_id);
+  const session = foundDelivery.session_id
+    ? db.prepare('SELECT id, patient_id, doctor_id, title, status, start_time FROM sessions WHERE id = ?').get(foundDelivery.session_id)
+    : null;
+
+  let notification: any = null;
+  let questionnaireRecommendation: any = null;
+  let questionnaire: any = null;
+  let template: any = null;
+  let familyMember: any = null;
+
+  if (foundDelivery.related_notification_id) {
+    notification = db.prepare('SELECT * FROM notifications WHERE id = ?').get(foundDelivery.related_notification_id);
+    if (notification) {
+      notification = {
+        id: notification.id,
+        patientId: notification.patient_id,
+        doctorId: notification.doctor_id,
+        familyMemberId: notification.family_member_id,
+        type: notification.type,
+        templateId: notification.template_id,
+        title: notification.title,
+        content: notification.content,
+        channel: notification.channel,
+        status: notification.status,
+        sentAt: notification.sent_at,
+        createdAt: notification.created_at,
+      };
+    }
+  }
+
+  if (foundDelivery.related_recommendation_id) {
+    questionnaireRecommendation = db.prepare('SELECT * FROM questionnaire_recommendations WHERE id = ?').get(foundDelivery.related_recommendation_id);
+    if (questionnaireRecommendation) {
+      questionnaireRecommendation = {
+        id: questionnaireRecommendation.id,
+        questionnaireId: questionnaireRecommendation.questionnaire_id,
+        patientId: questionnaireRecommendation.patient_id,
+        sessionId: questionnaireRecommendation.session_id,
+        reason: questionnaireRecommendation.reason,
+        status: questionnaireRecommendation.status,
+        createdAt: questionnaireRecommendation.created_at,
+      };
+    }
+  }
+
+  if (foundDelivery.questionnaire_id) {
+    const q = db.prepare('SELECT id, title, description, type FROM questionnaires WHERE id = ?').get(foundDelivery.questionnaire_id);
+    if (q) questionnaire = { id: q.id, title: q.title, description: q.description, type: q.type };
+  }
+
+  if (foundDelivery.template_id) {
+    const t = db.prepare('SELECT id, name, type, title, content, channel FROM message_templates WHERE id = ?').get(foundDelivery.template_id);
+    if (t) template = { id: t.id, name: t.name, type: t.type, title: t.title, content: t.content, channel: t.channel };
+  }
+
+  if (foundDelivery.family_member_id) {
+    const f = db.prepare('SELECT id, name, relationship, phone FROM family_members WHERE id = ?').get(foundDelivery.family_member_id);
+    if (f) familyMember = { id: f.id, name: f.name, relationship: f.relationship, phone: f.phone };
+  }
+
+  const allAuditLogs = db.prepare(`
+    SELECT * FROM audit_logs
+    WHERE resource_type = 'pending_delivery' AND resource_id = ?
+    ORDER BY created_at DESC
+  `).all(foundDelivery.id);
+
+  const sendAuditLog = allAuditLogs.find((log: any) => log.action === 'send_delivery') || null;
+
+  success(res, {
+    found: true,
+    sourceType,
+    sourceId,
+    delivery,
+    patient: patient ? {
+      id: patient.id,
+      name: patient.name,
+      age: patient.age,
+      gender: patient.gender,
+      phone: patient.phone,
+      doctorId: patient.doctor_id,
+    } : null,
+    session: session ? {
+      id: session.id,
+      patientId: session.patient_id,
+      doctorId: session.doctor_id,
+      title: session.title,
+      status: session.status,
+      startTime: session.start_time,
+    } : null,
+    sentBy: foundDelivery.sent_by,
+    sentAt: foundDelivery.sent_at,
+    notification,
+    questionnaireRecommendation,
+    questionnaire,
+    template,
+    familyMember,
+    sendAuditLog,
+    allAuditLogs,
+    navigation: {
+      canGoToDelivery: sourceType !== 'delivery',
+      canGoToNotification: sourceType !== 'notification' && !!notification,
+      canGoToQuestionnaire: sourceType !== 'questionnaire_recommendation' && !!questionnaireRecommendation,
+      canGoToAuditLog: sourceType !== 'audit_log' && !!sendAuditLog,
+      deliveryId: delivery.id,
+      notificationId: notification?.id || null,
+      recommendationId: questionnaireRecommendation?.id || null,
+      auditLogId: sendAuditLog?.id || null,
+    },
+  });
 };

@@ -93,7 +93,64 @@ export const getNotification = (req: Request, res: Response): void => {
     return;
   }
 
-  success(res, rowToNotification(row));
+  const notification = rowToNotification(row) as any;
+
+  const pendingDelivery = db.prepare(`
+    SELECT * FROM pending_deliveries WHERE related_notification_id = ?
+  `).get(id) as any;
+
+  if (pendingDelivery) {
+    notification.pendingDelivery = {
+      id: pendingDelivery.id,
+      type: pendingDelivery.type,
+      status: pendingDelivery.status,
+      title: pendingDelivery.title,
+      recommendedReason: pendingDelivery.recommended_reason,
+      riskLevel: pendingDelivery.risk_level,
+      channel: pendingDelivery.channel,
+      sentBy: pendingDelivery.sent_by,
+      sentAt: pendingDelivery.sent_at,
+      createdAt: pendingDelivery.created_at,
+    };
+
+    if (pendingDelivery.template_id) {
+      const t = db.prepare('SELECT id, name, type, title, content, channel FROM message_templates WHERE id = ?').get(pendingDelivery.template_id) as any;
+      if (t) {
+        notification.pendingDelivery.template = {
+          id: t.id,
+          name: t.name,
+          type: t.type,
+          title: t.title,
+        };
+      }
+    }
+
+    if (pendingDelivery.family_member_id) {
+      const f = db.prepare('SELECT id, name, relationship, phone FROM family_members WHERE id = ?').get(pendingDelivery.family_member_id) as any;
+      if (f) {
+        notification.pendingDelivery.familyMember = {
+          id: f.id,
+          name: f.name,
+          relationship: f.relationship,
+          phone: f.phone,
+        };
+      }
+    }
+
+    const sendAudit = db.prepare(`
+      SELECT * FROM audit_logs
+      WHERE resource_type = 'pending_delivery' AND resource_id = ? AND action = 'send_delivery'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(pendingDelivery.id) as any;
+
+    if (sendAudit) {
+      notification.pendingDelivery.auditLogId = sendAudit.id;
+    }
+
+    notification.relatedFrom = 'pending_delivery';
+  }
+
+  success(res, notification);
 };
 
 export const createNotification = (req: Request, res: Response): void => {

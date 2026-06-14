@@ -4,6 +4,8 @@ import {
   getDeliveryDetail,
   getDeliveryPreview,
   getDeliveryRelatedRecords,
+  getPatientDeliveryStats,
+  getRelationshipView,
   savePendingDeliveries,
   confirmAndSendDeliveries,
   updateDelivery,
@@ -21,6 +23,25 @@ router.get(
     logRequest: true,
   }),
   getPendingDeliveries
+);
+
+router.get(
+  '/stats/patients',
+  auditMiddleware({
+    action: 'get_delivery_patient_stats',
+    resourceType: 'delivery',
+  }),
+  getPatientDeliveryStats
+);
+
+router.get(
+  '/relationship',
+  auditMiddleware({
+    action: 'get_delivery_relationship',
+    resourceType: 'delivery',
+    logRequest: true,
+  }),
+  getRelationshipView
 );
 
 router.get(

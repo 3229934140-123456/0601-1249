@@ -114,7 +114,59 @@ export const getAuditLog = (req: Request, res: Response): void => {
     return;
   }
 
-  success(res, rowToAuditLog(row));
+  const auditLog = rowToAuditLog(row) as any;
+
+  if (row.resource_type === 'pending_delivery' && row.action === 'send_delivery') {
+    const delivery = db.prepare('SELECT * FROM pending_deliveries WHERE id = ?').get(row.resource_id) as any;
+    if (delivery) {
+      auditLog.relatedDelivery = {
+        id: delivery.id,
+        type: delivery.type,
+        status: delivery.status,
+        title: delivery.title,
+        patientId: delivery.patient_id,
+        sessionId: delivery.session_id,
+        riskLevel: delivery.risk_level,
+        channel: delivery.channel,
+        sentBy: delivery.sent_by,
+        sentAt: delivery.sent_at,
+      };
+
+      if (delivery.related_notification_id) {
+        const n = db.prepare('SELECT id, title, type, status, channel FROM notifications WHERE id = ?').get(delivery.related_notification_id) as any;
+        if (n) {
+          auditLog.relatedNotification = {
+            id: n.id,
+            title: n.title,
+            type: n.type,
+            status: n.status,
+            channel: n.channel,
+          };
+        }
+      }
+
+      if (delivery.related_recommendation_id) {
+        const qr = db.prepare('SELECT id, questionnaire_id, status FROM questionnaire_recommendations WHERE id = ?').get(delivery.related_recommendation_id) as any;
+        if (qr) {
+          const q = db.prepare('SELECT title FROM questionnaires WHERE id = ?').get(qr.questionnaire_id) as any;
+          auditLog.relatedRecommendation = {
+            id: qr.id,
+            questionnaireId: qr.questionnaire_id,
+            questionnaireTitle: q?.title,
+            status: qr.status,
+          };
+        }
+      }
+
+      auditLog.canNavigateTo = {
+        delivery: true,
+        notification: !!delivery.related_notification_id,
+        recommendation: !!delivery.related_recommendation_id,
+      };
+    }
+  }
+
+  success(res, auditLog);
 };
 
 export const getRetractedContents = (req: Request, res: Response): void => {

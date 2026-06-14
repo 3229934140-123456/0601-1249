@@ -308,6 +308,77 @@ export const recommendForPatient = (req: Request, res: Response): void => {
   }, '推荐成功');
 };
 
+export const getRecommendation = (req: Request, res: Response): void => {
+  const { id } = req.params;
+
+  const stmt = db.prepare(`
+    SELECT qr.*, q.title as questionnaire_title, q.type as questionnaire_type, q.description as questionnaire_description
+    FROM questionnaire_recommendations qr
+    LEFT JOIN questionnaires q ON qr.questionnaire_id = q.id
+    WHERE qr.id = ?
+  `);
+  const row = stmt.get(id) as any;
+
+  if (!row) {
+    notFound(res, '推荐记录不存在');
+    return;
+  }
+
+  const recommendation = {
+    ...rowToRecommendation(row),
+    questionnaireTitle: row.questionnaire_title,
+    questionnaireType: row.questionnaire_type,
+  } as any;
+
+  if (row.questionnaire_description) {
+    recommendation.questionnaireDescription = row.questionnaire_description;
+  }
+
+  const pendingDelivery = db.prepare(`
+    SELECT * FROM pending_deliveries WHERE related_recommendation_id = ?
+  `).get(id) as any;
+
+  if (pendingDelivery) {
+    recommendation.pendingDelivery = {
+      id: pendingDelivery.id,
+      type: pendingDelivery.type,
+      status: pendingDelivery.status,
+      title: pendingDelivery.title,
+      recommendedReason: pendingDelivery.recommended_reason,
+      riskLevel: pendingDelivery.risk_level,
+      channel: pendingDelivery.channel,
+      sentBy: pendingDelivery.sent_by,
+      sentAt: pendingDelivery.sent_at,
+      createdAt: pendingDelivery.created_at,
+    };
+
+    if (pendingDelivery.questionnaire_id) {
+      const q = db.prepare('SELECT id, title, type, description FROM questionnaires WHERE id = ?').get(pendingDelivery.questionnaire_id) as any;
+      if (q) {
+        recommendation.pendingDelivery.questionnaire = {
+          id: q.id,
+          title: q.title,
+          type: q.type,
+        };
+      }
+    }
+
+    const sendAudit = db.prepare(`
+      SELECT * FROM audit_logs
+      WHERE resource_type = 'pending_delivery' AND resource_id = ? AND action = 'send_delivery'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(pendingDelivery.id) as any;
+
+    if (sendAudit) {
+      recommendation.pendingDelivery.auditLogId = sendAudit.id;
+    }
+
+    recommendation.relatedFrom = 'pending_delivery';
+  }
+
+  success(res, recommendation);
+};
+
 export const updateRecommendationStatus = (req: Request, res: Response): void => {
   const { id } = req.params;
   const { status } = req.body;

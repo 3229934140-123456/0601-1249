@@ -6,6 +6,7 @@ import {
   updateQuestionnaire,
   deleteQuestionnaire,
   getRecommendations,
+  getRecommendation,
   recommendForPatient,
   updateRecommendationStatus,
 } from '../controllers/questionnaireController';
@@ -31,6 +32,16 @@ router.get(
     logRequest: true,
   }),
   getRecommendations
+);
+
+router.get(
+  '/recommendations/:id',
+  auditMiddleware({
+    action: 'get_recommendation',
+    resourceType: 'questionnaire',
+    getResourceId: (req) => req.params.id,
+  }),
+  getRecommendation
 );
 
 router.get(
