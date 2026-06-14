@@ -266,6 +266,181 @@ export const getRiskKeywordsList = (_req: Request, res: Response): void => {
   success(res, keywords);
 };
 
+export const getRiskDashboard = (req: Request, res: Response): void => {
+  const { patientId, sessionId, doctorId } = req.query;
+
+  let whereClause = 'WHERE 1=1';
+  const params: any[] = [];
+
+  if (patientId) {
+    whereClause += ' AND patient_id = ?';
+    params.push(patientId);
+  }
+  if (sessionId) {
+    whereClause += ' AND session_id = ?';
+    params.push(sessionId);
+  }
+
+  const totalStmt = db.prepare(`SELECT COUNT(*) as count FROM risk_alerts ${whereClause}`);
+  const total = (totalStmt.get(...params) as { count: number }).count;
+
+  const pendingStmt = db.prepare(`SELECT COUNT(*) as count FROM risk_alerts ${whereClause} AND status = 'pending'`);
+  const pendingCount = (pendingStmt.get(...params) as { count: number }).count;
+
+  const reviewedStmt = db.prepare(`SELECT COUNT(*) as count FROM risk_alerts ${whereClause} AND status = 'reviewed'`);
+  const reviewedCount = (reviewedStmt.get(...params) as { count: number }).count;
+
+  const ignoredStmt = db.prepare(`SELECT COUNT(*) as count FROM risk_alerts ${whereClause} AND status = 'ignored'`);
+  const ignoredCount = (ignoredStmt.get(...params) as { count: number }).count;
+
+  const byLevelStmt = db.prepare(`
+    SELECT level, COUNT(*) as count FROM risk_alerts ${whereClause}
+    GROUP BY level ORDER BY CASE level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END
+  `);
+  const byLevel = byLevelStmt.all(...params) as { level: string; count: number }[];
+
+  const pendingByLevelStmt = db.prepare(`
+    SELECT level, COUNT(*) as count FROM risk_alerts ${whereClause} AND status = 'pending'
+    GROUP BY level ORDER BY CASE level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END
+  `);
+  const pendingByLevel = pendingByLevelStmt.all(...params) as { level: string; count: number }[];
+
+  const byPatientStmt = db.prepare(`
+    SELECT patient_id, COUNT(*) as count,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+      SUM(CASE WHEN level = 'high' AND status = 'pending' THEN 1 ELSE 0 END) as high_pending_count
+    FROM risk_alerts
+    ${whereClause}
+    GROUP BY patient_id
+    ORDER BY high_pending_count DESC, pending_count DESC
+    LIMIT 20
+  `);
+  const byPatient = byPatientStmt.all(...params) as any[];
+
+  const bySessionStmt = db.prepare(`
+    SELECT session_id, COUNT(*) as count,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count
+    FROM risk_alerts
+    ${whereClause}
+    GROUP BY session_id
+    ORDER BY pending_count DESC
+    LIMIT 20
+  `);
+  const bySession = bySessionStmt.all(...params) as any[];
+
+  success(res, {
+    total,
+    pendingCount,
+    reviewedCount,
+    ignoredCount,
+    byLevel,
+    pendingByLevel,
+    byPatient,
+    bySession,
+  });
+};
+
+export const batchOperation = (req: Request, res: Response): void => {
+  const { ids, operation, operatedBy } = req.body;
+
+  if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    badRequest(res, '请提供要操作的风险提示ID列表');
+    return;
+  }
+
+  if (!operation) {
+    badRequest(res, '操作类型不能为空');
+    return;
+  }
+
+  if (!operatedBy) {
+    badRequest(res, '操作人不能为空');
+    return;
+  }
+
+  const validOperations = ['review', 'ignore', 'reopen'];
+  if (!validOperations.includes(operation)) {
+    badRequest(res, `操作类型只支持 ${validOperations.join('、')}`);
+    return;
+  }
+
+  const uniqueIds = [...new Set(ids)];
+
+  const results: {
+    id: string;
+    success: boolean;
+    code: string;
+    message: string;
+    alert?: RiskAlert;
+  }[] = [];
+
+  const getStmt = db.prepare('SELECT * FROM risk_alerts WHERE id = ?');
+
+  for (const alertId of uniqueIds) {
+    const existing = getStmt.get(alertId) as any;
+    if (!existing) {
+      results.push({ id: alertId, success: false, code: 'NOT_FOUND', message: '未找到' });
+      continue;
+    }
+
+    if (operation === 'review') {
+      if (existing.status === 'reviewed') {
+        results.push({ id: alertId, success: false, code: 'ALREADY_REVIEWED', message: '已处于已确认状态' });
+        continue;
+      }
+      const updateStmt = db.prepare(`
+        UPDATE risk_alerts
+        SET status = 'reviewed', reviewed_by = ?, reviewed_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ?
+      `);
+      updateStmt.run(operatedBy, alertId);
+      const updated = getStmt.get(alertId) as any;
+      results.push({ id: alertId, success: true, code: 'OK', message: '已确认', alert: rowToAlert(updated) });
+    } else if (operation === 'ignore') {
+      if (existing.status === 'ignored') {
+        results.push({ id: alertId, success: false, code: 'ALREADY_IGNORED', message: '已处于已忽略状态' });
+        continue;
+      }
+      const updateStmt = db.prepare(`
+        UPDATE risk_alerts
+        SET status = 'ignored', reviewed_by = ?, reviewed_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ?
+      `);
+      updateStmt.run(operatedBy, alertId);
+      const updated = getStmt.get(alertId) as any;
+      results.push({ id: alertId, success: true, code: 'OK', message: '已忽略', alert: rowToAlert(updated) });
+    } else if (operation === 'reopen') {
+      if (existing.status === 'pending') {
+        results.push({ id: alertId, success: false, code: 'ALREADY_PENDING', message: '已处于待处理状态' });
+        continue;
+      }
+      const updateStmt = db.prepare(`
+        UPDATE risk_alerts
+        SET status = 'pending', reviewed_by = NULL, reviewed_at = NULL, updated_at = datetime('now')
+        WHERE id = ?
+      `);
+      updateStmt.run(alertId);
+      const updated = getStmt.get(alertId) as any;
+      results.push({ id: alertId, success: true, code: 'OK', message: '已重新打开', alert: rowToAlert(updated) });
+    }
+  }
+
+  const successCount = results.filter((r) => r.success).length;
+
+  success(
+    res,
+    {
+      total: ids.length,
+      uniqueCount: uniqueIds.length,
+      successCount,
+      failedCount: uniqueIds.length - successCount,
+      operation,
+      results,
+    },
+    `批量操作完成：${successCount}条成功，${uniqueIds.length - successCount}条未处理`
+  );
+};
+
 export const detectRisksFromText = (req: Request, res: Response): void => {
   const { content } = req.body;
 

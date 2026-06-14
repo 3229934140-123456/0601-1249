@@ -6,6 +6,8 @@ import {
   reviewRiskAlert,
   reopenRiskAlert,
   batchReview,
+  batchOperation,
+  getRiskDashboard,
   deleteRiskAlert,
   getRiskKeywordsList,
   detectRisksFromText,
