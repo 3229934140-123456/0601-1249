@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../database';
 import { success, notFound, paginated, badRequest } from '../utils/response';
 import { Questionnaire, QuestionnaireRecommendation } from '../types';
-import { recommendQuestionnaires } from '../services/aiService';
+import { recommendQuestionnaires, detectRiskKeywords } from '../services/aiService';
 
 const rowToQuestionnaire = (row: any): Questionnaire => ({
   id: row.id,
@@ -218,7 +218,7 @@ export const getRecommendations = (req: Request, res: Response): void => {
 };
 
 export const recommendForPatient = (req: Request, res: Response): void => {
-  const { patientId, sessionId, symptoms, recordTypes } = req.body;
+  const { patientId, sessionId, symptoms, recordTypes, riskLevel, summaryId } = req.body;
 
   if (!patientId) {
     badRequest(res, '患者ID不能为空');
@@ -228,54 +228,84 @@ export const recommendForPatient = (req: Request, res: Response): void => {
   const symptomList = Array.isArray(symptoms) ? symptoms : symptoms ? [symptoms] : [];
   const typeList = Array.isArray(recordTypes) ? recordTypes : [];
 
-  const recommendations = recommendQuestionnaires(symptomList, typeList);
+  let resolvedRiskLevel = riskLevel as 'low' | 'medium' | 'high' | undefined;
+  let summaryContent: string | undefined;
+
+  if (summaryId) {
+    const summaryRow = db.prepare('SELECT content, symptoms FROM summaries WHERE id = ? AND patient_id = ?').get(summaryId, patientId) as any;
+    if (summaryRow) {
+      summaryContent = summaryRow.content;
+      if (summaryRow.symptoms && !symptomList.length) {
+        summaryRow.symptoms.split(',').filter(Boolean).forEach((s: string) => {
+          if (!symptomList.includes(s.trim())) symptomList.push(s.trim());
+        });
+      }
+    }
+  }
+
+  if (!resolvedRiskLevel && sessionId) {
+    const alerts = db.prepare(`
+      SELECT level FROM risk_alerts
+      WHERE patient_id = ? AND session_id = ? AND status = 'pending'
+      ORDER BY CASE level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END
+      LIMIT 1
+    `).all(patientId, sessionId) as any[];
+    if (alerts.length > 0) {
+      resolvedRiskLevel = alerts[0].level;
+    }
+  }
+
+  if (!resolvedRiskLevel && summaryContent) {
+    const detected = detectRiskKeywords(summaryContent);
+    if (detected.some((r) => r.level === 'high')) resolvedRiskLevel = 'high';
+    else if (detected.some((r) => r.level === 'medium')) resolvedRiskLevel = 'medium';
+    else if (detected.length > 0) resolvedRiskLevel = 'low';
+  }
+
+  const recommendations = recommendQuestionnaires(symptomList, typeList, resolvedRiskLevel, summaryContent);
 
   const allQuestionnaires = db.prepare('SELECT * FROM questionnaires').all() as any[];
 
   const result: any[] = [];
+  const usedQuestionnaireIds = new Set<string>();
+
   for (const rec of recommendations) {
-    let matchedQuestionnaire = allQuestionnaires.find(
-      (q) => symptomList.some((s: string) => q.recommended_for?.includes(s))
+    const matched = allQuestionnaires.find(
+      (q) => q.type === rec.questionnaireType && !usedQuestionnaireIds.has(q.id)
+    ) || allQuestionnaires.find(
+      (q) => !usedQuestionnaireIds.has(q.id) && (
+        rec.questionnaireType === 'general' ||
+        q.type === rec.questionnaireType ||
+        q.recommended_for?.includes(rec.questionnaireType)
+      )
     );
 
-    if (!matchedQuestionnaire && allQuestionnaires.length > 0) {
-      matchedQuestionnaire = allQuestionnaires[0];
-    }
-
-    if (matchedQuestionnaire) {
+    if (matched) {
+      usedQuestionnaireIds.add(matched.id);
       const id = uuidv4();
       const insertStmt = db.prepare(`
         INSERT INTO questionnaire_recommendations (id, questionnaire_id, patient_id, session_id, reason, status)
         VALUES (?, ?, ?, ?, ?, 'recommended')
       `);
-      insertStmt.run(id, matchedQuestionnaire.id, patientId, sessionId || null, rec.reason);
+      insertStmt.run(id, matched.id, patientId, sessionId || null, rec.reason);
 
       result.push({
         id,
-        questionnaireId: matchedQuestionnaire.id,
-        questionnaireTitle: matchedQuestionnaire.title,
+        questionnaireId: matched.id,
+        questionnaireTitle: matched.title,
+        questionnaireType: matched.type,
         reason: rec.reason,
+        riskLevel: resolvedRiskLevel,
       });
     }
   }
 
-  if (result.length === 0 && allQuestionnaires.length > 0) {
-    const q = allQuestionnaires[0];
-    const id = uuidv4();
-    const insertStmt = db.prepare(`
-      INSERT INTO questionnaire_recommendations (id, questionnaire_id, patient_id, session_id, reason, status)
-      VALUES (?, ?, ?, ?, ?, 'recommended')
-    `);
-    insertStmt.run(id, q.id, patientId, sessionId || null, '根据患者情况推荐');
-    result.push({
-      id,
-      questionnaireId: q.id,
-      questionnaireTitle: q.title,
-      reason: '根据患者情况推荐',
-    });
-  }
-
-  success(res, result, '推荐成功');
+  success(res, {
+    patientId,
+    sessionId,
+    detectedRiskLevel: resolvedRiskLevel || null,
+    recommendations: result,
+  }, '推荐成功');
 };
 
 export const updateRecommendationStatus = (req: Request, res: Response): void => {

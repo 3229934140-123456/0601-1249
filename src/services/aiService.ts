@@ -159,28 +159,86 @@ export const generateSummary = (records: { content: string; symptoms?: string; m
 
 export const recommendQuestionnaires = (
   symptoms: string[],
-  recordTypes: string[]
-): { questionnaireId: string; reason: string }[] => {
-  const recommendations: { questionnaireId: string; reason: string }[] = [];
+  recordTypes: string[],
+  riskLevel?: 'low' | 'medium' | 'high',
+  summaryContent?: string
+): { questionnaireType: string; reason: string }[] => {
+  const recommendations: { questionnaireType: string; reason: string }[] = [];
+
+  if (riskLevel === 'high') {
+    recommendations.push({
+      questionnaireType: 'symptom',
+      reason: '检测到高风险关键词，建议立即进行症状评估问卷',
+    });
+  }
+
+  if (riskLevel === 'medium' || riskLevel === 'high') {
+    recommendations.push({
+      questionnaireType: 'quality_of_life',
+      reason: '患者存在中等及以上风险，建议评估生活质量',
+    });
+  }
 
   const hasBloodPressureSymptoms = symptoms.some((s) =>
     ['头晕', '头痛', '血压高', '血压低', '胸闷', '心悸'].includes(s)
   );
   if (hasBloodPressureSymptoms) {
     recommendations.push({
-      questionnaireId: '',
+      questionnaireType: 'symptom',
       reason: '患者存在血压相关症状，建议进行症状评估',
     });
   }
 
   if (recordTypes.includes('medication') || symptoms.some((s) => ['不良反应', '副作用'].includes(s))) {
     recommendations.push({
-      questionnaireId: '',
+      questionnaireType: 'medication',
       reason: '需要了解患者用药依从性情况',
     });
   }
 
+  if (summaryContent && (summaryContent.includes('用药') || summaryContent.includes('服药') || summaryContent.includes('药物'))) {
+    const alreadyMed = recommendations.some((r) => r.questionnaireType === 'medication');
+    if (!alreadyMed) {
+      recommendations.push({
+        questionnaireType: 'medication',
+        reason: '摘要涉及用药内容，建议了解用药依从性',
+      });
+    }
+  }
+
+  if (recommendations.length === 0 && (symptoms.length > 0 || riskLevel)) {
+    recommendations.push({
+      questionnaireType: 'general',
+      reason: '根据患者随访情况推荐一般健康评估问卷',
+    });
+  }
+
   return recommendations;
+};
+
+export const recommendFamilyReminder = (
+  riskLevel?: 'low' | 'medium' | 'high',
+  summaryContent?: string
+): { templateType: string; reason: string; urgency: 'normal' | 'urgent' } => {
+  if (riskLevel === 'high') {
+    return {
+      templateType: 'alert',
+      reason: '患者存在高风险症状，建议通知家属关注',
+      urgency: 'urgent',
+    };
+  }
+  if (riskLevel === 'medium') {
+    return {
+      templateType: 'reminder',
+      reason: '患者存在中等风险，建议提醒家属协助随访',
+      urgency: 'normal',
+    };
+  }
+  return {
+    templateType: 'greeting',
+    reason: '患者随访情况正常，建议发送关怀通知',
+    urgency: 'normal',
+  };
 };
 
 export const hideSensitiveContent = (content: string): string => {

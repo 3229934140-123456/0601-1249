@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../database';
 import { success, notFound, paginated, badRequest } from '../utils/response';
 import { Notification, MessageTemplate } from '../types';
+import { recommendFamilyReminder, detectRiskKeywords } from '../services/aiService';
 
 const rowToNotification = (row: any): Notification => ({
   id: row.id,
@@ -362,4 +363,111 @@ export const createFamilyReminder = (req: Request, res: Response): void => {
   const row = getStmt.get(id) as any;
 
   success(res, rowToNotification(row), '家属提醒创建成功');
+};
+
+export const recommendFamilyReminderForPatient = (req: Request, res: Response): void => {
+  const { patientId, sessionId, riskLevel, summaryId, familyMemberId } = req.body;
+
+  if (!patientId) {
+    badRequest(res, '患者ID不能为空');
+    return;
+  }
+
+  let resolvedRiskLevel = riskLevel as 'low' | 'medium' | 'high' | undefined;
+  let summaryContent: string | undefined;
+
+  if (summaryId) {
+    const summaryRow = db.prepare('SELECT content FROM summaries WHERE id = ? AND patient_id = ?').get(summaryId, patientId) as any;
+    if (summaryRow) {
+      summaryContent = summaryRow.content;
+    }
+  }
+
+  if (!resolvedRiskLevel && sessionId) {
+    const alerts = db.prepare(`
+      SELECT level FROM risk_alerts
+      WHERE patient_id = ? AND session_id = ? AND status = 'pending'
+      ORDER BY CASE level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END
+      LIMIT 1
+    `).all(patientId, sessionId) as any[];
+    if (alerts.length > 0) {
+      resolvedRiskLevel = alerts[0].level;
+    }
+  }
+
+  if (!resolvedRiskLevel && summaryContent) {
+    const detected = detectRiskKeywords(summaryContent);
+    if (detected.some((r) => r.level === 'high')) resolvedRiskLevel = 'high';
+    else if (detected.some((r) => r.level === 'medium')) resolvedRiskLevel = 'medium';
+    else if (detected.length > 0) resolvedRiskLevel = 'low';
+  }
+
+  const recommendation = recommendFamilyReminder(resolvedRiskLevel, summaryContent);
+
+  const template = db.prepare(`
+    SELECT * FROM message_templates
+    WHERE type = ? OR type = 'greeting'
+    ORDER BY CASE WHEN type = ? THEN 0 ELSE 1 END, is_default DESC
+    LIMIT 1
+  `).get(recommendation.templateType, recommendation.templateType) as any;
+
+  const familyMembers = db.prepare(`
+    SELECT * FROM family_members WHERE patient_id = ? AND receive_notifications = 1
+  `).all(patientId) as any[];
+
+  const suggestedMember = familyMemberId
+    ? familyMembers.find((f) => f.id === familyMemberId)
+    : familyMembers[0];
+
+  success(res, {
+    patientId,
+    riskLevel: resolvedRiskLevel || null,
+    recommendation,
+    suggestedTemplate: template ? {
+      id: template.id,
+      name: template.name,
+      type: template.type,
+      title: template.title,
+      content: template.content,
+      channel: template.channel,
+    } : null,
+    suggestedFamilyMember: suggestedMember ? {
+      id: suggestedMember.id,
+      name: suggestedMember.name,
+      relationship: suggestedMember.relationship,
+      phone: suggestedMember.phone,
+    } : null,
+  }, '推荐完成');
+};
+
+export const confirmAndSendFamilyReminder = (req: Request, res: Response): void => {
+  const { patientId, familyMemberId, templateId, customTitle, customContent, channel = 'app', confirmedBy } = req.body;
+
+  if (!patientId || !confirmedBy) {
+    badRequest(res, '患者ID和确认人不能为空');
+    return;
+  }
+
+  let title = customTitle || '家属关怀提醒';
+  let content = customContent || '您的家人近期随访情况良好，请放心。';
+
+  if (templateId) {
+    const template = db.prepare('SELECT * FROM message_templates WHERE id = ?').get(templateId) as any;
+    if (template) {
+      title = customTitle || template.title;
+      content = customContent || template.content;
+    }
+  }
+
+  const id = uuidv4();
+  const stmt = db.prepare(`
+    INSERT INTO notifications (id, patient_id, doctor_id, family_member_id, type, template_id, title, content, channel, status, sent_at)
+    VALUES (?, ?, ?, ?, 'reminder', ?, ?, ?, ?, 'sent', datetime('now'))
+  `);
+  stmt.run(id, patientId, confirmedBy, familyMemberId || null, templateId || null, title, content, channel);
+
+  const getStmt = db.prepare('SELECT * FROM notifications WHERE id = ?');
+  const row = getStmt.get(id) as any;
+
+  success(res, rowToNotification(row), '家属提醒已发送');
 };

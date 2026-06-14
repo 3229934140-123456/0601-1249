@@ -119,10 +119,26 @@ export const reviewRiskAlert = (req: Request, res: Response): void => {
   const { id } = req.params;
   const { reviewedBy, status = 'reviewed' } = req.body;
 
-  const checkStmt = db.prepare('SELECT id FROM risk_alerts WHERE id = ?');
-  const exists = checkStmt.get(id);
-  if (!exists) {
+  if (!reviewedBy) {
+    badRequest(res, '审核人不能为空');
+    return;
+  }
+
+  const validStatuses = ['reviewed', 'ignored'];
+  if (!validStatuses.includes(status)) {
+    badRequest(res, `状态只支持 ${validStatuses.join(' 或 ')}`);
+    return;
+  }
+
+  const checkStmt = db.prepare('SELECT id, status FROM risk_alerts WHERE id = ?');
+  const existing = checkStmt.get(id) as any;
+  if (!existing) {
     notFound(res, '风险提示不存在');
+    return;
+  }
+
+  if (existing.status === status) {
+    badRequest(res, `风险提示已处于${status === 'reviewed' ? '已审核' : '已忽略'}状态`);
     return;
   }
 
@@ -131,12 +147,46 @@ export const reviewRiskAlert = (req: Request, res: Response): void => {
     SET status = ?, reviewed_by = ?, reviewed_at = datetime('now'), updated_at = datetime('now')
     WHERE id = ?
   `);
-  stmt.run(status, reviewedBy || null, id);
+  stmt.run(status, reviewedBy, id);
 
   const getStmt = db.prepare('SELECT * FROM risk_alerts WHERE id = ?');
   const row = getStmt.get(id) as any;
 
-  success(res, rowToAlert(row), '审核完成');
+  success(res, rowToAlert(row), status === 'reviewed' ? '已确认' : '已忽略');
+};
+
+export const reopenRiskAlert = (req: Request, res: Response): void => {
+  const { id } = req.params;
+  const { reopenedBy } = req.body;
+
+  if (!reopenedBy) {
+    badRequest(res, '操作人不能为空');
+    return;
+  }
+
+  const checkStmt = db.prepare('SELECT id, status FROM risk_alerts WHERE id = ?');
+  const existing = checkStmt.get(id) as any;
+  if (!existing) {
+    notFound(res, '风险提示不存在');
+    return;
+  }
+
+  if (existing.status === 'pending') {
+    badRequest(res, '风险提示已处于待处理状态');
+    return;
+  }
+
+  const stmt = db.prepare(`
+    UPDATE risk_alerts
+    SET status = 'pending', reviewed_by = NULL, reviewed_at = NULL, updated_at = datetime('now')
+    WHERE id = ?
+  `);
+  stmt.run(id);
+
+  const getStmt = db.prepare('SELECT * FROM risk_alerts WHERE id = ?');
+  const row = getStmt.get(id) as any;
+
+  success(res, rowToAlert(row), '已重新打开');
 };
 
 export const batchReview = (req: Request, res: Response): void => {
@@ -147,21 +197,51 @@ export const batchReview = (req: Request, res: Response): void => {
     return;
   }
 
-  const placeholders = ids.map(() => '?').join(', ');
-  const stmt = db.prepare(`
+  if (!reviewedBy) {
+    badRequest(res, '审核人不能为空');
+    return;
+  }
+
+  const validStatuses = ['reviewed', 'ignored'];
+  if (!validStatuses.includes(status)) {
+    badRequest(res, `批量状态只支持 ${validStatuses.join(' 或 ')}`);
+    return;
+  }
+
+  const results: { id: string; success: boolean; message: string }[] = [];
+  const getStmt = db.prepare('SELECT id, status FROM risk_alerts WHERE id = ?');
+  const updateStmt = db.prepare(`
     UPDATE risk_alerts
     SET status = ?, reviewed_by = ?, reviewed_at = datetime('now'), updated_at = datetime('now')
-    WHERE id IN (${placeholders})
+    WHERE id = ?
   `);
-  const result = stmt.run(status, reviewedBy || null, ...ids);
+
+  for (const alertId of ids) {
+    const existing = getStmt.get(alertId) as any;
+    if (!existing) {
+      results.push({ id: alertId, success: false, message: '未找到' });
+      continue;
+    }
+    if (existing.status === status) {
+      results.push({ id: alertId, success: false, message: `已处于${status === 'reviewed' ? '已审核' : '已忽略'}状态` });
+      continue;
+    }
+    updateStmt.run(status, reviewedBy, alertId);
+    results.push({ id: alertId, success: true, message: '处理成功' });
+  }
+
+  const successCount = results.filter((r) => r.success).length;
 
   success(
     res,
     {
-      updatedCount: result.changes,
+      total: ids.length,
+      successCount,
+      failedCount: ids.length - successCount,
       status,
+      results,
     },
-    '批量审核完成'
+    `批量处理完成：${successCount}条成功，${ids.length - successCount}条未处理`
   );
 };
 

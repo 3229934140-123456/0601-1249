@@ -189,7 +189,9 @@ export const getPatientTimeline = (req: Request, res: Response): void => {
       SELECT id, 'session' as type, title as content, created_at, status, NULL as subtype
       FROM sessions WHERE patient_id = ?
       UNION ALL
-      SELECT id, 'record' as type, substr(content, 1, 100) as content, created_at, 'active' as status, record_type as subtype
+      SELECT id, 'record' as type, substr(content, 1, 100) as content, created_at,
+        CASE WHEN is_merged = 1 AND merged_from_ids IS NOT NULL THEN 'merged' ELSE 'active' END as status,
+        CASE WHEN is_merged = 1 AND merged_from_ids IS NOT NULL THEN 'merged' ELSE record_type END as subtype
       FROM follow_up_records WHERE patient_id = ?
       UNION ALL
       SELECT id, 'summary' as type, substr(content, 1, 100) as content, created_at, status, generated_by as subtype

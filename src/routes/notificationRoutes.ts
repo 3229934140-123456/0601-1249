@@ -11,6 +11,8 @@ import {
   updateTemplate,
   deleteTemplate,
   createFamilyReminder,
+  recommendFamilyReminderForPatient,
+  confirmAndSendFamilyReminder,
 } from '../controllers/notificationController';
 import { auditMiddleware } from '../middleware/audit';
 
@@ -66,6 +68,28 @@ router.post(
     logResponse: true,
   }),
   createFamilyReminder
+);
+
+router.post(
+  '/family-reminder/recommend',
+  auditMiddleware({
+    action: 'recommend_family_reminder',
+    resourceType: 'notification',
+    logRequest: true,
+    logResponse: true,
+  }),
+  recommendFamilyReminderForPatient
+);
+
+router.post(
+  '/family-reminder/confirm-send',
+  auditMiddleware({
+    action: 'confirm_send_family_reminder',
+    resourceType: 'notification',
+    logRequest: true,
+    logResponse: true,
+  }),
+  confirmAndSendFamilyReminder
 );
 
 router.post(

@@ -214,13 +214,27 @@ export const mergeRecords = (req: Request, res: Response): void => {
   const placeholders = recordIds.map(() => '?').join(', ');
   const getStmt = db.prepare(`
     SELECT * FROM follow_up_records
-    WHERE id IN (${placeholders}) AND patient_id = ?
+    WHERE id IN (${placeholders})
     ORDER BY created_at ASC
   `);
-  const records = getStmt.all(...recordIds, patientId) as any[];
+  const records = getStmt.all(...recordIds) as any[];
 
-  if (records.length === 0) {
-    notFound(res, '未找到符合条件的记录');
+  if (records.length !== recordIds.length) {
+    const foundIds = new Set(records.map((r) => r.id));
+    const missingIds = recordIds.filter((id: string) => !foundIds.has(id));
+    badRequest(res, `以下记录ID不存在：${missingIds.join(', ')}`);
+    return;
+  }
+
+  const wrongPatient = records.filter((r) => r.patient_id !== patientId);
+  if (wrongPatient.length > 0) {
+    badRequest(res, `记录 ${wrongPatient.map((r) => r.id).join(', ')} 不属于该患者`);
+    return;
+  }
+
+  const wrongSession = records.filter((r) => r.session_id !== sessionId);
+  if (wrongSession.length > 0) {
+    badRequest(res, `记录 ${wrongSession.map((r) => r.id).join(', ')} 不属于该会话`);
     return;
   }
 
@@ -241,7 +255,7 @@ export const mergeRecords = (req: Request, res: Response): void => {
     mergedId,
     sessionId,
     patientId,
-    doctorId || null,
+    doctorId || records[0].doctor_id || null,
     mergedContent,
     uniqueSymptoms || null,
     allMedFeedback || null,
@@ -263,6 +277,7 @@ export const mergeRecords = (req: Request, res: Response): void => {
     {
       mergedRecord: rowToRecord(mergedRow),
       mergedCount: records.length,
+      sourceRecordIds: recordIds,
     },
     '合并成功'
   );

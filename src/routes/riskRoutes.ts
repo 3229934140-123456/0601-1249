@@ -4,6 +4,7 @@ import {
   getRiskAlert,
   createRiskAlert,
   reviewRiskAlert,
+  reopenRiskAlert,
   batchReview,
   deleteRiskAlert,
   getRiskKeywordsList,
@@ -73,6 +74,17 @@ router.post(
     logRequest: true,
   }),
   reviewRiskAlert
+);
+
+router.post(
+  '/:id/reopen',
+  auditMiddleware({
+    action: 'reopen_risk_alert',
+    resourceType: 'risk_alert',
+    getResourceId: (req) => req.params.id,
+    logRequest: true,
+  }),
+  reopenRiskAlert
 );
 
 router.post(

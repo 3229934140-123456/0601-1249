@@ -5,6 +5,26 @@ import { success, notFound, paginated, badRequest } from '../utils/response';
 import { Summary } from '../types';
 import { generateSummary, hideSensitiveContent } from '../services/aiService';
 
+const safeParseKeyPoints = (raw: string | null | undefined): string[] => {
+  if (!raw) return [];
+  if (typeof raw !== 'string') return [String(raw)];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(String);
+    return [String(parsed)];
+  } catch {
+    return [raw];
+  }
+};
+
+const hideAllSensitive = (summary: Summary): void => {
+  summary.content = hideSensitiveContent(summary.content || '');
+  summary.symptoms = hideSensitiveContent(summary.symptoms || '');
+  summary.medicationFeedback = hideSensitiveContent(summary.medicationFeedback || '');
+  const kp = safeParseKeyPoints(summary.keyPoints);
+  summary.keyPoints = JSON.stringify(kp.map(hideSensitiveContent));
+};
+
 const rowToSummary = (row: any): Summary => ({
   id: row.id,
   sessionId: row.session_id,
@@ -80,10 +100,7 @@ export const getSummary = (req: Request, res: Response): void => {
   const summary = rowToSummary(row);
 
   if (hideSensitive === 'true' || summary.isSensitiveHidden === 1) {
-    summary.content = hideSensitiveContent(summary.content);
-    summary.symptoms = summary.symptoms || '';
-    summary.medicationFeedback = summary.medicationFeedback || '';
-    summary.keyPoints = summary.keyPoints || '';
+    hideAllSensitive(summary);
   }
 
   success(res, summary);
@@ -227,10 +244,25 @@ export const confirmSummary = (req: Request, res: Response): void => {
   const { id } = req.params;
   const { confirmedBy, status = 'confirmed' } = req.body;
 
-  const checkStmt = db.prepare('SELECT id FROM summaries WHERE id = ?');
-  const exists = checkStmt.get(id);
-  if (!exists) {
+  if (!confirmedBy) {
+    badRequest(res, '确认人不能为空');
+    return;
+  }
+
+  if (status !== 'confirmed' && status !== 'rejected') {
+    badRequest(res, '状态只支持 confirmed 或 rejected');
+    return;
+  }
+
+  const checkStmt = db.prepare('SELECT id, status FROM summaries WHERE id = ?');
+  const existing = checkStmt.get(id) as any;
+  if (!existing) {
     notFound(res, '摘要不存在');
+    return;
+  }
+
+  if (existing.status === 'confirmed') {
+    badRequest(res, '摘要已确认，不可重复操作');
     return;
   }
 
@@ -239,12 +271,12 @@ export const confirmSummary = (req: Request, res: Response): void => {
     SET status = ?, confirmed_by = ?, confirmed_at = datetime('now'), updated_at = datetime('now')
     WHERE id = ?
   `);
-  stmt.run(status, confirmedBy || null, id);
+  stmt.run(status, confirmedBy, id);
 
   const getStmt = db.prepare('SELECT * FROM summaries WHERE id = ?');
   const row = getStmt.get(id) as any;
 
-  success(res, rowToSummary(row), '确认成功');
+  success(res, rowToSummary(row), status === 'confirmed' ? '确认成功' : '已拒绝');
 };
 
 export const deleteSummary = (req: Request, res: Response): void => {
@@ -268,7 +300,7 @@ export const exportSummary = (req: Request, res: Response): void => {
   const { format = 'text', hideSensitive = 'false' } = req.query;
 
   const stmt = db.prepare(`
-    SELECT s.*, p.name as patient_name
+    SELECT s.*, p.name as patient_name, p.phone as patient_phone
     FROM summaries s
     LEFT JOIN patients p ON s.patient_id = p.id
     WHERE s.id = ?
@@ -281,24 +313,37 @@ export const exportSummary = (req: Request, res: Response): void => {
   }
 
   const summary = rowToSummary(row);
-  const patientName = row.patient_name || '未知患者';
+  const shouldHide = hideSensitive === 'true' || summary.isSensitiveHidden === 1;
+  const patientName = shouldHide ? '***' : (row.patient_name || '未知患者');
+  const patientPhone = shouldHide ? '***' : (row.patient_phone || '');
 
-  let content = summary.content;
+  let content = summary.content || '';
   let symptoms = summary.symptoms || '';
   let medicationFeedback = summary.medicationFeedback || '';
-  let keyPoints = summary.keyPoints ? JSON.parse(summary.keyPoints) : [];
+  let keyPoints = safeParseKeyPoints(summary.keyPoints);
 
-  if (hideSensitive === 'true' || summary.isSensitiveHidden === 1) {
+  if (shouldHide) {
     content = hideSensitiveContent(content);
+    symptoms = hideSensitiveContent(symptoms);
+    medicationFeedback = hideSensitiveContent(medicationFeedback);
+    keyPoints = keyPoints.map(hideSensitiveContent);
   }
 
   if (format === 'json') {
     success(res, {
-      patientName: hideSensitive === 'true' ? '***' : patientName,
-      summary,
-      symptoms: symptoms ? symptoms.split(',') : [],
+      patientName,
+      patientPhone,
+      summaryId: summary.id,
+      sessionId: summary.sessionId,
+      status: summary.status,
+      generatedBy: summary.generatedBy,
+      confirmedBy: summary.confirmedBy,
+      confirmedAt: summary.confirmedAt,
+      content,
+      symptoms: symptoms ? symptoms.split(',').filter(Boolean) : [],
       keyPoints,
       medicationFeedback,
+      createdAt: summary.createdAt,
       exportedAt: new Date().toISOString(),
     });
     return;
@@ -307,10 +352,17 @@ export const exportSummary = (req: Request, res: Response): void => {
   let textContent = '';
   textContent += `随访摘要\n`;
   textContent += `${'='.repeat(40)}\n\n`;
-  textContent += `患者：${hideSensitive === 'true' ? '***' : patientName}\n`;
+  textContent += `患者：${patientName}\n`;
+  if (patientPhone) {
+    textContent += `联系电话：${patientPhone}\n`;
+  }
   textContent += `生成时间：${summary.createdAt}\n`;
-  textContent += `生成方式：${summary.generatedBy === 'ai' ? 'AI生成' : '人工编写'}\n\n`;
-  textContent += `${'-'.repeat(40)}\n`;
+  textContent += `生成方式：${summary.generatedBy === 'ai' ? 'AI生成' : '人工编写'}\n`;
+  if (summary.status !== 'draft') {
+    textContent += `确认状态：${summary.status === 'confirmed' ? '已确认' : '已拒绝'}\n`;
+    if (summary.confirmedBy) textContent += `确认人：${summary.confirmedBy}\n`;
+  }
+  textContent += `\n${'-'.repeat(40)}\n`;
   textContent += `摘要内容：\n${content}\n\n`;
 
   if (symptoms) {
@@ -350,14 +402,18 @@ export const hideSensitiveInSummary = (req: Request, res: Response): void => {
     return;
   }
 
-  const hiddenContent = hideSensitiveContent(row.content);
+  const hiddenContent = hideSensitiveContent(row.content || '');
+  const hiddenSymptoms = hideSensitiveContent(row.symptoms || '');
+  const hiddenMedFeedback = hideSensitiveContent(row.medication_feedback || '');
+  const kp = safeParseKeyPoints(row.key_points);
+  const hiddenKeyPoints = JSON.stringify(kp.map(hideSensitiveContent));
 
   const updateStmt = db.prepare(`
     UPDATE summaries
-    SET content = ?, is_sensitive_hidden = 1, updated_at = datetime('now')
+    SET content = ?, symptoms = ?, medication_feedback = ?, key_points = ?, is_sensitive_hidden = 1, updated_at = datetime('now')
     WHERE id = ?
   `);
-  updateStmt.run(hiddenContent, id);
+  updateStmt.run(hiddenContent, hiddenSymptoms || null, hiddenMedFeedback || null, hiddenKeyPoints || null, id);
 
   const getStmt = db.prepare('SELECT * FROM summaries WHERE id = ?');
   const updatedRow = getStmt.get(id) as any;
