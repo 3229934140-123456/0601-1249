@@ -7,6 +7,7 @@ import riskRoutes from './riskRoutes';
 import questionnaireRoutes from './questionnaireRoutes';
 import notificationRoutes from './notificationRoutes';
 import auditRoutes from './auditRoutes';
+import deliveryRoutes from './deliveryRoutes';
 
 const router = Router();
 
@@ -17,7 +18,7 @@ router.get('/health', (_req, res) => {
     data: {
       timestamp: new Date().toISOString(),
       service: 'health-followup-ai-platform',
-      version: '1.0.0',
+      version: '1.1.0',
     },
   });
 });
@@ -30,5 +31,6 @@ router.use('/risk-alerts', riskRoutes);
 router.use('/questionnaires', questionnaireRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/audit', auditRoutes);
+router.use('/delivery', deliveryRoutes);
 
 export default router;

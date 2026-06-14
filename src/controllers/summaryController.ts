@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../database';
 import { success, notFound, paginated, badRequest } from '../utils/response';
 import { Summary } from '../types';
-import { generateSummary, hideSensitiveContent } from '../services/aiService';
+import { generateSummary, hideSensitiveContent, isSensitiveHidden } from '../services/aiService';
 
 const safeParseKeyPoints = (raw: string | null | undefined): string[] => {
   if (!raw) return [];
@@ -314,8 +314,8 @@ export const exportSummary = (req: Request, res: Response): void => {
 
   const summary = rowToSummary(row);
   const shouldHide = hideSensitive === 'true' || summary.isSensitiveHidden === 1;
-  const patientName = shouldHide ? '***' : (row.patient_name || '未知患者');
-  const patientPhone = shouldHide ? '***' : (row.patient_phone || '');
+  const patientName = shouldHide ? '[姓名已脱敏]' : (row.patient_name || '未知患者');
+  const patientPhone = shouldHide ? '[手机号已脱敏]' : (row.patient_phone || '');
 
   let content = summary.content || '';
   let symptoms = summary.symptoms || '';
@@ -329,8 +329,17 @@ export const exportSummary = (req: Request, res: Response): void => {
     keyPoints = keyPoints.map(hideSensitiveContent);
   }
 
+  const allSensitiveContent = content + symptoms + medicationFeedback + keyPoints.join('');
+  const actuallyHidden = shouldHide || isSensitiveHidden(allSensitiveContent);
+
   if (format === 'json') {
     success(res, {
+      _meta: {
+        isSensitiveHidden: actuallyHidden,
+        hiddenFields: shouldHide ? ['patientName', 'patientPhone', 'content', 'symptoms', 'keyPoints', 'medicationFeedback'] : [],
+        exportFormat: 'json',
+        exportedAt: new Date().toISOString(),
+      },
       patientName,
       patientPhone,
       summaryId: summary.id,
@@ -344,14 +353,19 @@ export const exportSummary = (req: Request, res: Response): void => {
       keyPoints,
       medicationFeedback,
       createdAt: summary.createdAt,
-      exportedAt: new Date().toISOString(),
     });
     return;
   }
 
   let textContent = '';
   textContent += `随访摘要\n`;
-  textContent += `${'='.repeat(40)}\n\n`;
+  textContent += `${'='.repeat(40)}\n`;
+  if (actuallyHidden) {
+    textContent += `⚠️  本摘要已进行敏感内容脱敏处理\n`;
+    textContent += `${'='.repeat(40)}\n\n`;
+  } else {
+    textContent += `\n`;
+  }
   textContent += `患者：${patientName}\n`;
   if (patientPhone) {
     textContent += `联系电话：${patientPhone}\n`;
@@ -385,10 +399,14 @@ export const exportSummary = (req: Request, res: Response): void => {
   }
 
   textContent += `${'='.repeat(40)}\n`;
+  if (actuallyHidden) {
+    textContent += `☑️  敏感内容已脱敏处理，包括：姓名、手机号、身份证、地址等\n`;
+  }
   textContent += `备注：本摘要由AI辅助生成，仅供参考，不做诊断结论。\n`;
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="summary-${id}.txt"`);
+  res.setHeader('X-Sensitive-Hidden', actuallyHidden ? 'true' : 'false');
   res.send(textContent);
 };
 

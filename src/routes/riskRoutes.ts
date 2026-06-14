@@ -17,6 +17,16 @@ import { auditMiddleware } from '../middleware/audit';
 const router = Router();
 
 router.get(
+  '/dashboard',
+  auditMiddleware({
+    action: 'get_risk_dashboard',
+    resourceType: 'risk_alert',
+    logRequest: true,
+  }),
+  getRiskDashboard
+);
+
+router.get(
   '/',
   auditMiddleware({
     action: 'list_risk_alerts',
@@ -24,6 +34,17 @@ router.get(
     logRequest: true,
   }),
   getRiskAlerts
+);
+
+router.post(
+  '/batch/operation',
+  auditMiddleware({
+    action: 'batch_operation_risk_alerts',
+    resourceType: 'risk_alert',
+    logRequest: true,
+    logResponse: true,
+  }),
+  batchOperation
 );
 
 router.get(

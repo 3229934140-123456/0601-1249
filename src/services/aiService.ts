@@ -45,10 +45,25 @@ const MEDICATION_PATTERNS = [
 
 const SENSITIVE_PATTERNS = [
   /(身份证|证件)(号码|号)?[:：]?\s*[0-9Xx]{15,18}/g,
-  /(手机号|电话|手机)[:：]?\s*1[3-9]\d{9}/g,
-  /(地址|住址|家庭地址)[:：]?\s*[\u4e00-\u9fa50-9]{5,50}/g,
-  /(姓名|患者姓名)[:：]?\s*[\u4e00-\u9fa5]{2,4}/g,
+  /(身份证号|证件号)[:：]?\s*[0-9Xx]{15,18}/g,
+  /(?<![\w])[1-9]\d{5}(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx](?![\w])/g,
+  /(手机号|电话|手机|联系电话)[:：]?\s*1[3-9]\d{9}/g,
+  /1[3-9]\d{9}/g,
+  /(地址|住址|家庭地址|现住址|居住地址|户籍地)[:：]?\s*[\u4e00-\u9fa50-9\-_]{5,80}/g,
+  /[\u4e00-\u9fa5]{2,}(省|市|区|县|镇|乡|街|路|巷|弄|号|楼|室|园|苑|小区|大厦|公寓)[\u4e00-\u9fa50-9\-_]{0,50}/g,
+  /(姓名|患者姓名|病人姓名|家属姓名|联系人)[:：]?\s*[\u4e00-\u9fa5]{2,6}/g,
+  /(银行卡号|卡号|银行账号)[:：]?\s*\d{16,22}/g,
+  /\d{16,22}/g,
+  /(邮编|邮政编码)[:：]?\s*\d{6}/g,
+  /(QQ|qq|微信|WeChat|微信号)[:：]?\s*[\w-]{4,30}/g,
+  /(邮箱|email|E-mail|电子邮箱)[:：]?\s*[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}/g,
+  /[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}/g,
 ];
+
+const ID_CARD_PATTERN = /^[1-9]\d{5}(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx]$/;
+const PHONE_PATTERN = /^1[3-9]\d{9}$/;
+const EMAIL_PATTERN = /^[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}$/;
+const BANK_CARD_PATTERN = /^\d{16,22}$/;
 
 export const extractSymptoms = (content: string): string[] => {
   const symptoms: string[] = [];
@@ -242,27 +257,44 @@ export const recommendFamilyReminder = (
 };
 
 export const hideSensitiveContent = (content: string): string => {
+  if (!content || typeof content !== 'string') return content;
   let result = content;
+
+  result = result.replace(/[1-9]\d{5}(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx]/g, '[身份证号已脱敏]');
+  result = result.replace(/1[3-9]\d{9}/g, '[手机号已脱敏]');
+  result = result.replace(/[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}/g, '[邮箱已脱敏]');
+  result = result.replace(/(?<!\d)\d{16,22}(?!\d)/g, '[银行卡号已脱敏]');
 
   for (const pattern of SENSITIVE_PATTERNS) {
     result = result.replace(pattern, (match) => {
-      if (match.includes('身份证') || match.includes('证件')) {
-        return '身份证号：***';
-      }
-      if (match.includes('手机') || match.includes('电话')) {
-        return '手机号：***';
-      }
-      if (match.includes('地址')) {
-        return '地址：***';
-      }
-      if (match.includes('姓名')) {
-        return '姓名：***';
-      }
-      return '***';
+      if (ID_CARD_PATTERN.test(match)) return '[身份证号已脱敏]';
+      if (PHONE_PATTERN.test(match)) return '[手机号已脱敏]';
+      if (EMAIL_PATTERN.test(match)) return '[邮箱已脱敏]';
+      if (BANK_CARD_PATTERN.test(match)) return '[银行卡号已脱敏]';
+      if (match.includes('身份证') || match.includes('证件')) return '[身份证号已脱敏]';
+      if (match.includes('手机') || match.includes('电话') || match.includes('联系电话')) return '[手机号已脱敏]';
+      if (match.includes('地址') || match.includes('省') || match.includes('市') || match.includes('区') || match.includes('县')) return '[地址已脱敏]';
+      if (match.includes('姓名') || match.includes('患者姓名') || match.includes('联系人')) return '[姓名已脱敏]';
+      if (match.includes('银行卡') || match.includes('卡号')) return '[银行卡号已脱敏]';
+      if (match.includes('邮箱') || match.includes('email') || match.includes('Email')) return '[邮箱已脱敏]';
+      if (match.includes('微信') || match.includes('QQ') || match.includes('微信号')) return '[联系方式已脱敏]';
+      return '[敏感内容已脱敏]';
     });
   }
 
   return result;
+};
+
+export const isSensitiveHidden = (content: string): boolean => {
+  if (!content || typeof content !== 'string') return false;
+  return content.includes('[身份证号已脱敏]')
+    || content.includes('[手机号已脱敏]')
+    || content.includes('[地址已脱敏]')
+    || content.includes('[姓名已脱敏]')
+    || content.includes('[银行卡号已脱敏]')
+    || content.includes('[邮箱已脱敏]')
+    || content.includes('[联系方式已脱敏]')
+    || content.includes('[敏感内容已脱敏]');
 };
 
 export const getRiskKeywords = () => RISK_KEYWORDS;

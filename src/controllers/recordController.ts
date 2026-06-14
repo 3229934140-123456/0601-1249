@@ -73,7 +73,56 @@ export const getRecord = (req: Request, res: Response): void => {
     return;
   }
 
-  success(res, rowToRecord(row));
+  const record = rowToRecord(row) as any;
+
+  if (record.isMerged === 1 && record.mergedFromIds) {
+    try {
+      const sourceIds = JSON.parse(record.mergedFromIds);
+      const sources = db.prepare(`
+        SELECT id, created_at, substr(content, 1, 80) as content_preview, is_merged
+        FROM follow_up_records WHERE id IN (${sourceIds.map(() => '?').join(', ')})
+        ORDER BY created_at ASC
+      `).all(...sourceIds) as any[];
+
+      record.mergeInfo = {
+        isMergeResult: true,
+        sourceCount: sourceIds.length,
+        sourceIds,
+        sourceRecords: sources.map((s: any) => ({
+          id: s.id,
+          createdAt: s.created_at,
+          contentPreview: s.content_preview,
+          isMerged: s.is_merged === 1,
+        })),
+        mergeSummary: `本记录由 ${sourceIds.length} 条随访记录合并生成，点击来源记录可查看详情。`,
+      };
+    } catch (e) {
+      record.mergeInfo = {
+        isMergeResult: true,
+        sourceCount: 0,
+        sourceIds: [],
+        mergeSummary: '合并来源信息解析失败',
+      };
+    }
+  } else if (record.isMerged === 1) {
+    const mergedInto = db.prepare(`
+      SELECT id, created_at, substr(content, 1, 80) as content_preview
+      FROM follow_up_records
+      WHERE merged_from_ids LIKE ?
+      LIMIT 1
+    `).get(`%"${id}"%`) as any;
+
+    if (mergedInto) {
+      record.mergeInfo = {
+        isSourceRecord: true,
+        mergedIntoId: mergedInto.id,
+        mergedIntoCreatedAt: mergedInto.created_at,
+        mergedIntoContentPreview: mergedInto.content_preview,
+      };
+    }
+  }
+
+  success(res, record);
 };
 
 export const createRecord = (req: Request, res: Response): void => {
@@ -211,30 +260,89 @@ export const mergeRecords = (req: Request, res: Response): void => {
     return;
   }
 
-  const placeholders = recordIds.map(() => '?').join(', ');
+  const uniqueIds = [...new Set(recordIds)];
+  const duplicates = recordIds.length !== uniqueIds.length;
+  const duplicateIds = duplicates
+    ? recordIds.filter((id: string, idx: number) => recordIds.indexOf(id) !== idx)
+    : [];
+
+  if (duplicates) {
+    success(
+      res,
+      {
+        success: false,
+        code: 'DUPLICATE_IDS',
+        message: '提交了重复的记录ID',
+        errors: [
+          {
+            type: 'duplicate',
+            recordIds: duplicateIds,
+            message: `存在 ${duplicateIds.length} 个重复的记录ID：${duplicateIds.join(', ')}`,
+          },
+        ],
+        submittedIds: recordIds,
+        uniqueCount: uniqueIds.length,
+        submittedCount: recordIds.length,
+      },
+      '合并失败'
+    );
+    return;
+  }
+
+  const placeholders = uniqueIds.map(() => '?').join(', ');
   const getStmt = db.prepare(`
     SELECT * FROM follow_up_records
     WHERE id IN (${placeholders})
     ORDER BY created_at ASC
   `);
-  const records = getStmt.all(...recordIds) as any[];
+  const records = getStmt.all(...uniqueIds) as any[];
 
-  if (records.length !== recordIds.length) {
+  const errors: any[] = [];
+
+  if (records.length !== uniqueIds.length) {
     const foundIds = new Set(records.map((r) => r.id));
-    const missingIds = recordIds.filter((id: string) => !foundIds.has(id));
-    badRequest(res, `以下记录ID不存在：${missingIds.join(', ')}`);
-    return;
+    const missingIds = uniqueIds.filter((id: string) => !foundIds.has(id));
+    errors.push({
+      type: 'not_found',
+      recordIds: missingIds,
+      message: `以下 ${missingIds.length} 个记录ID不存在：${missingIds.join(', ')}`,
+    });
   }
 
   const wrongPatient = records.filter((r) => r.patient_id !== patientId);
   if (wrongPatient.length > 0) {
-    badRequest(res, `记录 ${wrongPatient.map((r) => r.id).join(', ')} 不属于该患者`);
-    return;
+    errors.push({
+      type: 'wrong_patient',
+      recordIds: wrongPatient.map((r) => r.id),
+      message: `以下 ${wrongPatient.length} 条记录不属于该患者：${wrongPatient.map((r) => r.id).join(', ')}`,
+      expectedPatientId: patientId,
+    });
   }
 
   const wrongSession = records.filter((r) => r.session_id !== sessionId);
   if (wrongSession.length > 0) {
-    badRequest(res, `记录 ${wrongSession.map((r) => r.id).join(', ')} 不属于该会话`);
+    errors.push({
+      type: 'wrong_session',
+      recordIds: wrongSession.map((r) => r.id),
+      message: `以下 ${wrongSession.length} 条记录不属于该会话：${wrongSession.map((r) => r.id).join(', ')}`,
+      expectedSessionId: sessionId,
+    });
+  }
+
+  if (errors.length > 0) {
+    success(
+      res,
+      {
+        success: false,
+        code: 'VALIDATION_FAILED',
+        message: '记录校验失败，请检查错误明细',
+        errors,
+        submittedIds: uniqueIds,
+        validCount: records.length - wrongPatient.length - wrongSession.length,
+        totalSubmitted: uniqueIds.length,
+      },
+      '合并失败'
+    );
     return;
   }
 
@@ -259,7 +367,7 @@ export const mergeRecords = (req: Request, res: Response): void => {
     mergedContent,
     uniqueSymptoms || null,
     allMedFeedback || null,
-    JSON.stringify(recordIds)
+    JSON.stringify(uniqueIds)
   );
 
   const updateStmt = db.prepare(`
@@ -267,7 +375,7 @@ export const mergeRecords = (req: Request, res: Response): void => {
     SET is_merged = 1, updated_at = datetime('now')
     WHERE id IN (${placeholders})
   `);
-  updateStmt.run(...recordIds);
+  updateStmt.run(...uniqueIds);
 
   const resultStmt = db.prepare('SELECT * FROM follow_up_records WHERE id = ?');
   const mergedRow = resultStmt.get(mergedId) as any;
@@ -275,9 +383,11 @@ export const mergeRecords = (req: Request, res: Response): void => {
   success(
     res,
     {
+      success: true,
       mergedRecord: rowToRecord(mergedRow),
       mergedCount: records.length,
-      sourceRecordIds: recordIds,
+      sourceRecordIds: uniqueIds,
+      mergeSummary: `成功合并 ${records.length} 条随访记录`,
     },
     '合并成功'
   );

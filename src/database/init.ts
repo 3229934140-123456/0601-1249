@@ -207,8 +207,35 @@ const initDatabase = () => {
     CREATE INDEX IF NOT EXISTS idx_risk_alerts_patient_id ON risk_alerts(patient_id);
     CREATE INDEX IF NOT EXISTS idx_risk_alerts_status ON risk_alerts(status);
     CREATE INDEX IF NOT EXISTS idx_notifications_patient_id ON notifications(patient_id);
+    CREATE TABLE IF NOT EXISTS pending_deliveries (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT NOT NULL,
+      session_id TEXT,
+      summary_id TEXT,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      title TEXT NOT NULL,
+      content TEXT,
+      template_id TEXT,
+      questionnaire_id TEXT,
+      family_member_id TEXT,
+      recommended_reason TEXT,
+      risk_level TEXT,
+      channel TEXT DEFAULT 'app',
+      sent_by TEXT,
+      sent_at TEXT,
+      related_notification_id TEXT,
+      related_recommendation_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (patient_id) REFERENCES patients(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
+    CREATE INDEX IF NOT EXISTS idx_pending_deliveries_patient ON pending_deliveries(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_pending_deliveries_status ON pending_deliveries(status);
+    CREATE INDEX IF NOT EXISTS idx_pending_deliveries_type ON pending_deliveries(type);
   `);
 
   console.log('数据库表创建完成');

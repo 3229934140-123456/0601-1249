@@ -179,6 +179,29 @@ export interface FamilyMember {
   createdAt: string;
 }
 
+export interface PendingDelivery {
+  id: string;
+  patientId: string;
+  sessionId?: string;
+  summaryId?: string;
+  type: 'questionnaire' | 'family_reminder' | 'notification';
+  status: 'pending' | 'sent' | 'cancelled';
+  title: string;
+  content?: string;
+  templateId?: string;
+  questionnaireId?: string;
+  familyMemberId?: string;
+  recommendedReason?: string;
+  riskLevel?: 'low' | 'medium' | 'high';
+  channel?: string;
+  sentBy?: string;
+  sentAt?: string;
+  relatedNotificationId?: string;
+  relatedRecommendationId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ApiResponse<T = any> {
   code: number;
   message: string;
